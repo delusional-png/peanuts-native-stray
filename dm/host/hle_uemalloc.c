@@ -78,7 +78,7 @@ static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     size_t old = plat_malloc_size(p);
     if (free_check()) check_freed(p, "reallocated");
     a = align_of(n, a);   // PEANUTS: #236
-    if (!((uintptr_t)p & (a - 1)) && old >= n) return p;
+    if (!((uintptr_t)p & (a - 1)) && old >= n) return p; // PEANUTS(upstream-candidate): avoid unaligned realloc() for UE4/PhysX
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
 }
