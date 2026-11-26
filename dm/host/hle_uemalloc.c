@@ -56,7 +56,8 @@ static uint32_t align_of(size_t n, uint32_t a) {
 }
 static void *alloc(size_t n, uint32_t a) {
     a = align_of(n, a);   // PEANUTS: #236
-    void *p = a == 16 ? plat_zone_malloc(g_zone, n ? n : 1) : plat_zone_memalign(g_zone, a, n ? n : 1);
+    if (a & (a - 1)) { uint32_t p2 = 16; while (p2 < a && p2 < (1u << 30)) p2 <<= 1; a = p2; }   // PEANUTS(upstream-candidate): power-of-two for posix_memalign
+    void *p = plat_zone_memalign(g_zone, a, n ? n : 1);   // PEANUTS(upstream-candidate): enforce >=16-byte alignment (PhysX)
     if (p) used((int64_t)plat_malloc_size(p));
     return p;
 }
@@ -77,7 +78,6 @@ static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     size_t old = plat_malloc_size(p);
     if (free_check()) check_freed(p, "reallocated");
     a = align_of(n, a);   // PEANUTS: #236
-    if (a == 16) { void *q = plat_zone_realloc(g_zone, p, n); if (q) used((int64_t)plat_malloc_size(q) - (int64_t)old); return q; }
     if (!((uintptr_t)p & (a - 1)) && old >= n) return p;
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
