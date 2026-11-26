@@ -57,11 +57,12 @@ final class TouchControls extends View {
     private float tx, ty, tr;      // the show / hide button
     private float picX, picY, picW = 1, picH = 1;   // the game's picture in the view, normalized
 
-    // The user's layout, one per screen shape (prof: the view's size in steps of 40 units, so a foldable's two screens keep one each): each group (the left stick with L3,
-    // the D-pad, the face buttons, the right stick with R3, the left and the right shoulders with − / +) moved by (gdx, gdy) units and scaled by gsc around its centre,
+    // The user's layout, one per screen shape (prof: the view's size in steps of 40 units, so a foldable's two screens keep one each): each group (the left stick,
+    // the D-pad, the face buttons, the right stick, − L ZL, + R ZR, L3, R3) moved by (gdx, gdy) units and scaled by gsc around its centre,
     // and where the picture sits in the free space (placeX, placeY: 0 left / top, 0.5 centred, 1 right / bottom; nxhost_picture_place)
-    private static final int GROUPS = 6;
-    private static final String[] GROUP_NAME = {"left stick", "D-pad", "A B X Y", "right stick", "ZL L −", "ZR R +"};
+    private static final int GROUP_LEFT_STICK = 0, GROUP_DPAD = 1, GROUP_FACE = 2, GROUP_RIGHT_STICK = 3,
+            GROUP_LEFT_SHOULDER = 4, GROUP_RIGHT_SHOULDER = 5, GROUP_L3 = 6, GROUP_R3 = 7, GROUPS = 8;
+    private static final String[] GROUP_NAME = {"left stick", "D-pad", "A B X Y", "right stick", "− L ZL", "+ R ZR", "L3", "R3"};
     private String prof;
     private final float[] gdx = new float[GROUPS], gdy = new float[GROUPS], gsc = new float[GROUPS];
     private float placeX = 0.5f, placeY = 0.5f;
@@ -200,6 +201,7 @@ final class TouchControls extends View {
         float y0 = Math.max(0, h - 380 * d), bh = h - y0;
         float bar = picX * w;   // the width of each letterbox bar
         float rStick = 60 * d, rRight = 54 * d, rPad = 50 * d, rFace = 25 * d, rSh = 25 * d, rSmall = 17 * d, rClick = 17 * d, off = 1.65f * rFace;
+        float gap = Math.max(12 * d, 10 * u);
         n = 0;
         // Shoulders in the band's top corners, ZL / ZR outside, L / R inside, minus / plus next to them
         float shY = y0 + m + 0.7f * rSh;
@@ -212,10 +214,9 @@ final class TouchControls extends View {
         // Left: the stick high, the D-pad low, centred in the bar when it is wide enough
         float top = shY + rSh + 10 * d;
         float lx = Math.max(m + rStick, bar / 2), ly = Math.max(y0 + bh * 0.45f, top + rStick);
-        int ls = add(STICK, 0, 0, SHAPE_ROUND, lx, ly, rStick, "");
-        add(DPAD, UP | DOWN | LEFT | RIGHT, 0, SHAPE_ROUND, Math.max(m + rPad, bar / 2), h - m - rPad, rPad, "");
-        float diag = (rStick + rClick + 6 * d) * 0.7071f;
-        add(BUTTON, LS, 0, SHAPE_ROUND, lx + diag, ly + diag, rClick, "L3");
+        add(STICK, 0, 0, SHAPE_ROUND, lx, ly, rStick, "");
+        float padX = Math.max(m + rPad, bar / 2), padY = h - m - rPad;
+        add(DPAD, UP | DOWN | LEFT | RIGHT, 0, SHAPE_ROUND, padX, padY, rPad, "");
         // Right: the face buttons high (A right, B bottom, X top, Y left, as on a Switch), the right stick low
         float fx = Math.min(w - m - rFace - off, w - bar / 2), fy = ly;
         add(BUTTON, A, 0, SHAPE_ROUND, fx + off, fy, rFace, "A");
@@ -224,13 +225,18 @@ final class TouchControls extends View {
         add(BUTTON, Y, 0, SHAPE_ROUND, fx - off, fy, rFace, "Y");
         float rx = Math.min(w - m - rRight, w - bar / 2), ry = h - m - rRight;
         add(STICK, 0, 1, SHAPE_ROUND, rx, ry, rRight, "");
-        float diagR = (rRight + rClick + 6 * d) * 0.7071f;
-        add(BUTTON, RS, 0, SHAPE_ROUND, rx - diagR, ry - diagR, rClick, "R3");
+        // L3 and R3 as their own adjustable sections, positioned clear of the sticks, D-pad and face buttons
+        float l3x = padX + rPad + gap + rClick;
+        float l3y = Math.min(h - m - rClick, Math.max(ly + rStick + gap + rClick, padY - rPad * 0.25f));
+        add(BUTTON, LS, 0, SHAPE_ROUND, l3x, l3y, rClick, "L3");
+        float r3x = rx - rRight - gap - rClick;
+        float r3y = Math.min(h - m - rClick, Math.max(fy + off + rFace + gap + rClick, ry - rRight * 0.25f));
+        add(BUTTON, RS, 0, SHAPE_ROUND, r3x, r3y, rClick, "R3");
         // Push apart what still overlaps (a large size on a small screen): the later control moves towards the middle
         for (int pass = 0; pass < 4; pass++)
             for (int j = 0; j < n; j++)
                 for (int i = 0; i < j; i++) {
-                    float dx = cx[j] - cx[i], dy = cy[j] - cy[i], need = r[i] + r[j] + 2 * d;
+                    float dx = cx[j] - cx[i], dy = cy[j] - cy[i], need = r[i] + r[j] + (groupOf(i) != groupOf(j) ? gap : 2 * d);
                     if (dx * dx + dy * dy >= need * need) continue;
                     float move = (float) Math.sqrt(Math.max(0, need * need - dy * dy)) - Math.abs(dx);
                     cx[j] += cx[j] < w / 2f ? move : -move;
@@ -256,14 +262,16 @@ final class TouchControls extends View {
     // ---- The user's layout: groups moved and scaled, the picture placed, kept per screen shape ----
     private int groupOf(int i) {
         long b = buttons[i];
-        if (kind[i] == STICK) return stick[i] == 0 ? 0 : 3;
-        if (kind[i] == DPAD) return 1;
-        if (b == LS) return 0;
-        if (b == RS) return 3;
-        if ((b & (A | B | X | Y)) != 0) return 2;
-        if ((b & (ZL | L | MINUS)) != 0) return 4;
-        return 5;
+        if (kind[i] == STICK) return stick[i] == 0 ? GROUP_LEFT_STICK : GROUP_RIGHT_STICK;
+        if (kind[i] == DPAD) return GROUP_DPAD;
+        if (b == LS) return GROUP_L3;
+        if (b == RS) return GROUP_R3;
+        if ((b & (A | B | X | Y)) != 0) return GROUP_FACE;
+        if ((b & (ZL | L | MINUS)) != 0) return GROUP_LEFT_SHOULDER;
+        return GROUP_RIGHT_SHOULDER;
     }
+
+    private float halfY(int i) { return shape[i] == SHAPE_SHOULDER ? r[i] * 0.62f : r[i]; }
 
     /** Moves and scales each group as the user left it, around the centre of where the automatic layout put it, kept inside the view; gbox gets each group's bounds */
     private void groups(int w, int h, float u) {
@@ -276,10 +284,14 @@ final class TouchControls extends View {
             for (int i = 0; i < n; i++) {
                 if (groupOf(i) != g) continue;
                 cx[i] = mx + (cx[i] - mx) * sc + gdx[g] * u; cy[i] = my + (cy[i] - my) * sc + gdy[g] * u; r[i] *= sc;
-                x0 = Math.min(x0, cx[i] - r[i]); y0 = Math.min(y0, cy[i] - r[i]); x1 = Math.max(x1, cx[i] + r[i]); y1 = Math.max(y1, cy[i] + r[i]);
+                float ry = halfY(i);
+                x0 = Math.min(x0, cx[i] - r[i]); y0 = Math.min(y0, cy[i] - ry); x1 = Math.max(x1, cx[i] + r[i]); y1 = Math.max(y1, cy[i] + ry);
             }
             float ox = x0 < 0 ? -x0 : x1 > w ? w - x1 : 0, oy = y0 < 0 ? -y0 : y1 > h ? h - y1 : 0;   // off the view: back inside
-            if (ox != 0 || oy != 0) for (int i = 0; i < n; i++) if (groupOf(i) == g) { cx[i] += ox; cy[i] += oy; }
+            if (ox != 0 || oy != 0) {
+                for (int i = 0; i < n; i++) if (groupOf(i) == g) { cx[i] += ox; cy[i] += oy; }
+                if (editing && g == dragG) { gdx[g] += ox / u; gdy[g] += oy / u; }
+            }
             gbox[g] = new RectF(x0 + ox, y0 + oy, x1 + ox, y1 + oy);
         }
     }
@@ -363,6 +375,38 @@ final class TouchControls extends View {
         box.addView(t); box.addView(rg);
     }
 
+    /** Distance from (x, y) to control i's drawn edge (<= 0 when inside the control) */
+    private float edgeDist(int i, float x, float y) {
+        float dx = x - cx[i], dy = y - cy[i];
+        if (shape[i] == SHAPE_SHOULDER) {
+            float ex = Math.max(0, Math.abs(dx) - r[i]), ey = Math.max(0, Math.abs(dy) - halfY(i));
+            return ex > 0 || ey > 0 ? (float) Math.hypot(ex, ey) : Math.max(Math.abs(dx) - r[i], Math.abs(dy) - halfY(i));
+        }
+        return (float) Math.hypot(dx, dy) - r[i];
+    }
+
+    /** Picks the group at (x, y) in the layout editor: a direct hit on a control wins (smallest radius / closest centre if stacked), else the nearest group whose padded box contains (x, y) */
+    private int pickGroup(float x, float y, float pad) {
+        int best = -1;
+        float bestR = Float.MAX_VALUE, bestDist = Float.MAX_VALUE;
+        for (int i = 0; i < n; i++) {
+            if (edgeDist(i, x, y) > 0) continue;
+            float d = (float) Math.hypot(x - cx[i], y - cy[i]);
+            if (r[i] < bestR - 1f || (Math.abs(r[i] - bestR) <= 1f && d < bestDist)) {
+                best = groupOf(i); bestR = r[i]; bestDist = d;
+            }
+        }
+        if (best >= 0) return best;
+        float bestEdge = Float.MAX_VALUE;
+        for (int g = 0; g < GROUPS; g++) {
+            if (gbox[g] == null || x < gbox[g].left - pad || x > gbox[g].right + pad || y < gbox[g].top - pad || y > gbox[g].bottom + pad) continue;
+            float ge = Float.MAX_VALUE;
+            for (int i = 0; i < n; i++) if (groupOf(i) == g) ge = Math.min(ge, edgeDist(i, x, y));
+            if (ge < bestEdge) { bestEdge = ge; best = g; }
+        }
+        return best;
+    }
+
     // ---- The editor's touches ----
     private boolean editTouch(MotionEvent e) {
         int act = e.getActionMasked(), i = e.getActionIndex(), id = e.getPointerId(i);
@@ -370,10 +414,7 @@ final class TouchControls extends View {
         switch (act) {
             case MotionEvent.ACTION_DOWN: {
                 for (int k = 0; k < tool.length; k++) if (tool[k] != null && tool[k].contains(x, y)) { toolTap(k); return true; }
-                dragG = -1;
-                float pad = 10 * unit();
-                for (int g = 0; g < GROUPS; g++)
-                    if (gbox[g] != null && x >= gbox[g].left - pad && x <= gbox[g].right + pad && y >= gbox[g].top - pad && y <= gbox[g].bottom + pad) { dragG = g; break; }
+                dragG = pickGroup(x, y, 10 * unit());
                 if (dragG < 0 && x >= picX * getWidth() && x <= (picX + picW) * getWidth() && y >= picY * getHeight() && y <= (picY + picH) * getHeight()) dragG = GROUPS;
                 dragId = id; lastX = x; lastY = y;
                 invalidate();
@@ -552,13 +593,14 @@ final class TouchControls extends View {
         rect.set(picX * w, picY * h, (picX + picW) * w, (picY + picH) * h);
         if (dragG == GROUPS) { fill.setColor(Color.argb(50, 255, 210, 60)); c.drawRect(rect, fill); }
         c.drawRect(rect, line);
-        for (int g = 0; g < GROUPS; g++) {
-            if (gbox[g] == null) continue;
-            line.setColor(g == dragG ? Color.argb(255, 255, 210, 60) : Color.argb(160, 255, 255, 255));
-            rect.set(gbox[g]); rect.inset(-4 * u, -4 * u);
-            if (g == dragG) { fill.setColor(Color.argb(60, 255, 210, 60)); c.drawRoundRect(rect, 8 * u, 8 * u, fill); }
-            c.drawRoundRect(rect, 8 * u, 8 * u, line);
-        }
+        for (int pass = 0; pass < 2; pass++)
+            for (int g = 0; g < GROUPS; g++) {
+                if (gbox[g] == null || (g == dragG) != (pass == 1)) continue;
+                line.setColor(g == dragG ? Color.argb(255, 255, 210, 60) : Color.argb(160, 255, 255, 255));
+                rect.set(gbox[g]); rect.inset(-4 * u, -4 * u);
+                if (g == dragG) { fill.setColor(Color.argb(60, 255, 210, 60)); c.drawRoundRect(rect, 8 * u, 8 * u, fill); }
+                c.drawRoundRect(rect, 8 * u, 8 * u, line);
+            }
         float bw = 74 * u, bh = 34 * u, gap = 8 * u, x = (w - (TOOL.length * bw + (TOOL.length - 1) * gap)) / 2, y = 14 * u;
         text.setTextSize(15 * u);
         for (int k = 0; k < TOOL.length; k++, x += bw + gap) {
