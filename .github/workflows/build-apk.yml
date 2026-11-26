@@ -284,7 +284,7 @@ jobs:
           seen = set()
           total_bytes = 0
           def add(tid):
-              nonlocal total_bytes
+              global total_bytes
               tid = tid.strip().upper()
               if not re.fullmatch(r'[0-9A-F]{16}', tid) or tid in seen:
                   return False
