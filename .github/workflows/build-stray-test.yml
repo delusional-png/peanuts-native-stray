@@ -16,16 +16,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
       - name: Build test APK
         run: |
-          if [ -f ./gradlew ]; then
-            GRADLE_DIR="."
-          else
-            GRADLE_DIR="android"
-          fi
-          cd "$GRADLE_DIR"
-          chmod +x gradlew
-          ./gradlew apk \
+          ls -la android/
+          cd android
+          gradle apk \
             -PnxApp=peanuts \
             -PnxAppId=strayfix \
             -PnxLabel="Peanuts StrayFix" \
