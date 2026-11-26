@@ -1,0 +1,45 @@
+name: Build Stray Fix APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build test APK
+        run: |
+          if [ -f ./gradlew ]; then
+            GRADLE_DIR="."
+          else
+            GRADLE_DIR="android"
+          fi
+          cd "$GRADLE_DIR"
+          chmod +x gradlew
+          ./gradlew apk \
+            -PnxApp=peanuts \
+            -PnxAppId=strayfix \
+            -PnxLabel="Peanuts StrayFix" \
+            -PnxGames=010075101EF84000 \
+            -PnxPackEngine=fake
+
+      - name: Collect APKs
+        run: |
+          mkdir -p built-apks
+          find . -name "*.apk" -exec cp -v {} built-apks/ \;
+          ls -la built-apks/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: peanuts-stray-fix-apk
+          path: built-apks/*.apk
