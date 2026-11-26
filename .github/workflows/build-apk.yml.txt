@@ -1,0 +1,443 @@
+name: Build Peanuts Native APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: 'Upstream igawa6/peanuts-native branch to base the build on (dev-0.1.9 includes all 0.1.8 games, 0.1.9 perf fixes, Stray PhysX fix, and Hogwarts Legacy PRs #513/#572/#692/#785)'
+        required: false
+        default: 'dev-0.1.9'
+        type: string
+      include_019_new_games:
+        description: 'Include newly added 0.1.9 Switch 1 game profiles on top of all 76 shipped 0.1.8 games'
+        required: false
+        default: true
+        type: boolean
+      apply_extra_prs:
+        description: 'Apply verified unmerged upstream PRs (#820 texel-buffer cache for UE4/Hogwarts, #838 cold-run layered pipeline wait)'
+        required: false
+        default: true
+        type: boolean
+      extra_pr_numbers:
+        description: 'Optional extra igawa6/peanuts-native PR numbers (space or comma separated)'
+        required: false
+        default: ''
+        type: string
+      app_id_suffix:
+        description: 'Application ID suffix (dev.nxnative.android.<suffix>; use "peanuts" or e.g. "peanutsfork" to install side-by-side)'
+        required: false
+        default: 'peanuts'
+        type: string
+      app_label:
+        description: 'Launcher display name'
+        required: false
+        default: 'Peanuts Native'
+        type: string
+      version_name:
+        description: 'APK version name'
+        required: false
+        default: '0.1.9-fork'
+        type: string
+  push:
+    branches: [main, master]
+    paths:
+      - 'android/app/src/main/java/dev/nxnative/android/TouchControls.java'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-apk:
+    name: Build Peanuts Native 0.1.9 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Free disk space on runner
+        run: |
+          sudo rm -rf /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h / /tmp
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh cmake ninja-build curl git perl build-essential pkg-config
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Python build packages (fonttools)
+        run: python3 -m pip install --quiet fonttools
+
+      - name: Set up .NET 10 SDK (for libdmsh_xlate.so NativeAOT)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Android SDK, NDK 28.2.13676358, and CMake 3.22.1
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Assemble build tree from igawa6/peanuts-native + fork TouchControls + extra PRs
+        env:
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'dev-0.1.9' }}
+          APPLY_EXTRA_PRS: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_extra_prs || github.event_name != 'workflow_dispatch' }}
+          EXTRA_PR_NUMBERS: ${{ inputs.extra_pr_numbers || '' }}
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="/tmp/peanuts-build"
+          REPO_DIR="$BUILD_ROOT/repo"
+          rm -rf "$BUILD_ROOT"
+          mkdir -p "$BUILD_ROOT"
+
+          echo "Cloning https://github.com/igawa6/peanuts-native.git (branch: $UPSTREAM_BRANCH)..."
+          git clone --depth 150 --branch "$UPSTREAM_BRANCH" https://github.com/igawa6/peanuts-native.git "$REPO_DIR"
+          cd "$REPO_DIR"
+          git config user.name "Peanuts CI"
+          git config user.email "ci@users.noreply.github.com"
+
+          UPSTREAM_SHA="$(git rev-parse --short=12 HEAD)"
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> "$GITHUB_ENV"
+          echo "Upstream HEAD: $UPSTREAM_BRANCH @ $UPSTREAM_SHA"
+
+          # Verify key Hogwarts Legacy & Stray fixes are present in the upstream branch
+          echo "Checking landed Hogwarts Legacy / Stray fixes..."
+          grep -q "malloc16_size" dm/host/hle_uemalloc.c && echo "  [OK] Stray/UE4 16-byte PhysX alignment fix (hle_uemalloc.c)"
+          grep -q "thermal_cap" android/app/build.gradle && echo "  [OK] Hogwarts Legacy PR #513 (thermal cap, pipeline cache, 12GB Handheld)"
+          test -f dm/games/0100F7E00C70E000/game.tsv && echo "  [OK] Hogwarts Legacy profile (0100F7E00C70E000)"
+          test -f dm/games/010075101EF84000/game.tsv && echo "  [OK] Stray profile (010075101EF84000)"
+
+          # Overlay fork's 8-group separated TouchControls.java and commit it cleanly
+          FORK_TC="$GITHUB_WORKSPACE/android/app/src/main/java/dev/nxnative/android/TouchControls.java"
+          if [ -f "$FORK_TC" ]; then
+            cp "$FORK_TC" "$REPO_DIR/android/app/src/main/java/dev/nxnative/android/TouchControls.java"
+            grep -q "GROUPS = 8" "$REPO_DIR/android/app/src/main/java/dev/nxnative/android/TouchControls.java"
+            git add android/app/src/main/java/dev/nxnative/android/TouchControls.java
+            git commit -m "TouchControls: separate -/L/ZL, +/R/ZR, L3, and R3 into 8 independent groups"
+            echo "  [OK] Applied fork's 8-group TouchControls.java (− L ZL, + R ZR, L3, R3 separated)"
+          fi
+
+          # Apply verified unmerged PRs on top of dev-0.1.9 (each committed separately so a conflict never reverts prior work)
+          PR_LIST=""
+          if [ "$APPLY_EXTRA_PRS" = "true" ]; then
+            # #820: expand g_tbc texel-buffer cache (helps UE4 / Hogwarts Legacy texel-buffer workload)
+            # #838: background pipelines wait on <=128x128 layered targets (prevents cold-run lighting/LUT misses)
+            PR_LIST="820 838"
+          fi
+          if [ -n "$EXTRA_PR_NUMBERS" ]; then
+            CLEAN_EXTRA="$(echo "$EXTRA_PR_NUMBERS" | tr ',' ' ')"
+            PR_LIST="$PR_LIST $CLEAN_EXTRA"
+          fi
+
+          APPLIED_PRS=""
+          SKIPPED_PRS=""
+          for pr in $PR_LIST; do
+            pr="$(echo "$pr" | tr -cd '0-9')"
+            [ -n "$pr" ] || continue
+            echo "::group::Applying upstream PR #$pr"
+            DIFF_FILE="$BUILD_ROOT/pr-${pr}.diff"
+            curl -sSfL "https://patch-diff.githubusercontent.com/raw/igawa6/peanuts-native/pull/${pr}.diff" -o "$DIFF_FILE"
+            EXCLUDE_ARGS=(
+              --exclude='peanuts/UPSTREAM-EDITS.md'
+              --exclude='docs/agents/*'
+              --exclude='docs/reference/*'
+              --exclude='dm/host/tests/*'
+            )
+            if git apply --reverse --check "${EXCLUDE_ARGS[@]}" "$DIFF_FILE" 2>/dev/null; then
+              echo "PR #$pr is already included in $UPSTREAM_BRANCH; skipping."
+              SKIPPED_PRS="$SKIPPED_PRS #${pr}(already-in-branch)"
+            elif git apply "${EXCLUDE_ARGS[@]}" "$DIFF_FILE"; then
+              git add -A
+              git commit -m "Apply upstream PR #${pr}"
+              echo "Applied PR #$pr cleanly."
+              APPLIED_PRS="$APPLIED_PRS #${pr}"
+            elif git apply --3way "${EXCLUDE_ARGS[@]}" "$DIFF_FILE"; then
+              git add -A
+              git commit -m "Apply upstream PR #${pr} (3-way)"
+              echo "Applied PR #$pr via 3-way merge."
+              APPLIED_PRS="$APPLIED_PRS #${pr}(3way)"
+            else
+              echo "::warning::PR #$pr did not apply cleanly onto $UPSTREAM_BRANCH; reverting only PR #$pr and continuing."
+              git reset --hard HEAD
+              git clean -fd
+              SKIPPED_PRS="$SKIPPED_PRS #${pr}(conflict)"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "APPLIED_PRS=${APPLIED_PRS# }" >> "$GITHUB_ENV"
+          echo "SKIPPED_PRS=${SKIPPED_PRS# }" >> "$GITHUB_ENV"
+          echo "REPO_DIR=$REPO_DIR" >> "$GITHUB_ENV"
+
+          # Compute deterministic cache key for the native on-device packer stage
+          TREE_SHA="$(python3 dm/gfx/tools/xlate_tree.py | tr -d '\n\r ')"
+          STAGE_HASH="$(
+            (
+              echo "$TREE_SHA"
+              sha256sum android/ondevice/build.sh android/ondevice/dm_pack.c dm/peanuts/pack_worker/build.sh dm/peanuts/pack_worker/*.c
+            ) | sha256sum | cut -c1-16
+          )"
+          echo "STAGE_KEY=peanuts-ondevice-stage-v2-${STAGE_HASH}" >> "$GITHUB_ENV"
+          echo "STAGE_DIR=/tmp/peanuts-stage" >> "$GITHUB_ENV"
+          echo "Computed stage cache key: peanuts-ondevice-stage-v2-${STAGE_HASH}"
+
+      - name: Restore cached on-device packer stage
+        id: stage-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/peanuts-stage/stage
+          key: ${{ env.STAGE_KEY }}
+
+      - name: Build native on-device packer stage (if cache miss or stale translator)
+        run: |
+          set -euo pipefail
+          cd "$REPO_DIR"
+          NEED_STAGE=1
+          if [ -f "$STAGE_DIR/stage/lib/libdmsh_xlate.so" ] && \
+             [ -f "$STAGE_DIR/stage/lib/libSPIRV-Tools-shared.so" ] && \
+             [ -f "$STAGE_DIR/stage/lib/libpython3.14.so" ] && \
+             [ -f "$STAGE_DIR/stage/python/lib/python3.14/lib-dynload/_nxyaz0.cpython-314-aarch64-linux-android.so" ]; then
+            if python3 dm/gfx/tools/xlate_tree.py --check-lib "$STAGE_DIR/stage/lib/libdmsh_xlate.so"; then
+              echo "Cached on-device packer stage is valid and matches this source tree."
+              NEED_STAGE=0
+            else
+              echo "Cached libdmsh_xlate.so does not match this tree; rebuilding stage..."
+            fi
+          fi
+          if [ "$NEED_STAGE" = "1" ]; then
+            rm -rf "$STAGE_DIR"
+            mkdir -p "$STAGE_DIR"
+            zsh peanuts/scripts/ondevice-stage.sh "$STAGE_DIR" all
+          fi
+
+      - name: Compute full game list (all 0.1.8 shipped titles + new 0.1.9 Switch 1 profiles)
+        env:
+          INCLUDE_019_NEW: ${{ github.event_name == 'workflow_dispatch' && inputs.include_019_new_games || github.event_name != 'workflow_dispatch' }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+
+          repo = pathlib.Path(os.environ['REPO_DIR'])
+          include_new = os.environ.get('INCLUDE_019_NEW', 'true').lower() == 'true'
+
+          # Estimate a title's BuildConfig.NX_PROFILES UTF-8 byte footprint so we never exceed javac's 65,535-byte string limit
+          PROFILE_KEYS = {
+              'name', 'build', 'option', 'option_patch', 'recommend', 'fpslocker', 'fps_memory',
+              'fpslocker_plan', 'fps_plan', 'fps_plan_120', 'aspect_plan', 'res_preset', 'res_preset_from',
+              'scene_scale', 'scene_arg', 'romfs_check', 'variant', 'aspect', 'skip_layers', 'render_cfg',
+              'rt_pool', 'graphics_scale',
+          }
+          def est_bytes(tid):
+              n = 96
+              gdir = repo / 'dm/games' / tid
+              for fn in ('game.tsv', 'readiness.tsv', 'vk_delta.tsv'):
+                  p = gdir / fn
+                  if not p.is_file():
+                      continue
+                  for line in p.read_text(encoding='utf-8', errors='replace').splitlines():
+                      if not line or line.startswith('#'):
+                          continue
+                      k = line.split('\t', 1)[0]
+                      if fn == 'game.tsv' and k in PROFILE_KEYS:
+                          n += len(line.encode('utf-8'))
+                      elif fn == 'readiness.tsv' and k in ('required', 'degraded', 'status'):
+                          n += len(line.encode('utf-8'))
+                      elif fn == 'vk_delta.tsv' and k in ('from', 'stamp'):
+                          n += len(line.encode('utf-8'))
+              return n
+
+          # 1. Start with gradle.properties nxGames (keeps Breath of the Wild 01007EF00011E000 first for self-test)
+          ordered = []
+          seen = set()
+          total_bytes = 0
+          def add(tid):
+              nonlocal total_bytes
+              tid = tid.strip().upper()
+              if not re.fullmatch(r'[0-9A-F]{16}', tid) or tid in seen:
+                  return False
+              tsv = repo / 'dm/games' / tid / 'game.tsv'
+              if not tsv.is_file():
+                  return False
+              txt = tsv.read_text(encoding='utf-8', errors='replace')
+              if '\nbuild\t' not in ('\n' + txt):
+                  return False
+              seen.add(tid)
+              ordered.append(tid)
+              total_bytes += est_bytes(tid)
+              return True
+
+          gp = (repo / 'android/app/gradle.properties').read_text(encoding='utf-8')
+          m = re.search(r'(?m)^nxGames=(.+)$', gp)
+          if m:
+              for tid in m.group(1).split(','):
+                  add(tid)
+
+          # 2. All shipped titles in peanuts/release-titles.txt (all 76 0.1.8 titles, incl. Hogwarts Legacy & Stray)
+          rel_file = repo / 'peanuts/release-titles.txt'
+          if rel_file.is_file():
+              for line in rel_file.read_text(encoding='utf-8').splitlines():
+                  add(line)
+
+          base_count = len(ordered)
+
+          # 3. Newly added Switch 1 profiles merged in dev-0.1.9 (validated with gen_runtime_profile.py + 65KB string guard)
+          new_019_candidates = [
+              '0100ACD0163D0000', # Batman: Arkham Knight
+              '01004BC0166CC000', # CRISIS CORE -FINAL FANTASY VII- REUNION
+              '01008C0016544000', # Sea of Stars
+              '010056B015FE8000', # NieR:Automata The End of YoRHa Edition
+              '0100A3501946E000', # OCTOPATH TRAVELER II
+              '0100A9D01C446000', # DRAGON QUEST VII Reimagined
+              '0100EB100AB42000', # FINAL FANTASY XII THE ZODIAC AGE
+              '01001BB01E8E2000', # FANTASIAN Neo Dimension
+              '01002E7016C46000', # Cult of the Lamb
+              '01008FE00E2F6000', # One Piece Pirate Warriors 4
+              '010093C0215B4000', # The Hundred Line -Last Defense Academy-
+              '0100C5000F294000', # Battle Brothers
+              '01000EA014150000', # FINAL FANTASY (Pixel Remaster)
+              '01006A800016E000', # Super Smash Bros. Ultimate
+              '0100E95004038000', # Xenoblade Chronicles 2
+          ]
+          added_019 = []
+          if include_new:
+              gen = repo / 'dm/peanuts/profile/gen_runtime_profile.py'
+              for tid in new_019_candidates:
+                  if tid in seen:
+                      continue
+                  tsv = repo / 'dm/games' / tid / 'game.tsv'
+                  if not tsv.is_file():
+                      continue
+                  sz = est_bytes(tid)
+                  if total_bytes + sz > 59000:
+                      print(f'Skipping {tid} (~{sz}B): keeping BuildConfig.NX_PROFILES safely below javac 65535-byte limit (current ~{total_bytes}B)')
+                      continue
+                  chk = subprocess.run(
+                      ['python3', str(gen), 'profile', tid, f'/tmp/chk-{tid}.bin'],
+                      cwd=repo, capture_output=True, text=True
+                  )
+                  if chk.returncode == 0:
+                      if add(tid):
+                          added_019.append(tid)
+                  else:
+                      print(f'Skipping {tid}: gen_runtime_profile.py returned {chk.returncode}')
+
+          assert '0100F7E00C70E000' in seen, 'Hogwarts Legacy (0100F7E00C70E000) missing from game list!'
+          assert '010075101EF84000' in seen, 'Stray (010075101EF84000) missing from game list!'
+
+          print(f'Base games (gradle.properties + release-titles.txt): {base_count}')
+          print(f'Added 0.1.9 new profiles ({len(added_019)}): {", ".join(added_019)}')
+          print(f'Total games in APK: {len(ordered)} (estimated BuildConfig.NX_PROFILES ~{total_bytes} bytes)')
+
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write(f'NX_GAMES={",".join(ordered)}\n')
+              f.write(f'NX_GAMES_COUNT={len(ordered)}\n')
+              f.write(f'NX_ADDED_019={",".join(added_019)}\n')
+          PY
+
+      - name: Compile Peanuts Native APK with Gradle
+        env:
+          APP_ID_SUFFIX: ${{ inputs.app_id_suffix || 'peanuts' }}
+          APP_LABEL: ${{ inputs.app_label || 'Peanuts Native' }}
+          VERSION_NAME: ${{ inputs.version_name || '0.1.9-fork' }}
+        run: |
+          set -euo pipefail
+          cd "$REPO_DIR/android/app"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+
+          # Build Peanuts Native generic-host APK with full on-device packer
+          ./gradlew apk \
+            -PnxApp=peanuts \
+            -PnxAppId="$APP_ID_SUFFIX" \
+            -PnxLabel="$APP_LABEL" \
+            -PnxGenericHost=true \
+            -PnxGames="$NX_GAMES" \
+            -PnxPackStage="$STAGE_DIR/stage" \
+            -PnxVersion="$VERSION_NAME" \
+            --no-daemon
+
+          mkdir -p /tmp/peanuts-out
+          BUILT_APK="out/nxnative-android-peanuts.apk"
+          if [ ! -f "$BUILT_APK" ]; then
+            BUILT_APK="$(ls out/*.apk | head -1)"
+          fi
+          FINAL_APK="/tmp/peanuts-out/peanuts-native-${VERSION_NAME}-${APP_ID_SUFFIX}.apk"
+          cp "$BUILT_APK" "$FINAL_APK"
+
+          # Optional release re-signing if repository secrets are configured
+          if [ -n "${{ secrets.NX_SIGN_KEYSTORE_B64 }}" ] && [ -n "${{ secrets.NX_SIGN_ALIAS }}" ] && [ -n "${{ secrets.NX_SIGN_PASS }}" ]; then
+            echo "Signing APK with configured release keystore..."
+            echo "${{ secrets.NX_SIGN_KEYSTORE_B64 }}" | base64 -d > /tmp/release.keystore
+            APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+            "$APKSIGNER" sign \
+              --ks /tmp/release.keystore \
+              --ks-key-alias "${{ secrets.NX_SIGN_ALIAS }}" \
+              --ks-pass "pass:${{ secrets.NX_SIGN_PASS }}" \
+              --key-pass "pass:${{ secrets.NX_SIGN_PASS }}" \
+              "$FINAL_APK"
+            rm -f /tmp/release.keystore
+          fi
+
+          # Write build manifest alongside APK
+          cat > /tmp/peanuts-out/build-manifest.txt <<EOF
+          Peanuts Native Fork APK Build
+          =============================
+          Upstream base: igawa6/peanuts-native (${{ inputs.upstream_branch || 'dev-0.1.9' }} @ $UPSTREAM_SHA)
+          Application ID: dev.nxnative.android.${APP_ID_SUFFIX}
+          App label: ${APP_LABEL}
+          Version: ${VERSION_NAME}
+          Total supported games: ${NX_GAMES_COUNT}
+          Includes Hogwarts Legacy (0100F7E00C70E000): YES (with PRs #513, #572, #692, #785 from dev-0.1.9)
+          Includes Stray (010075101EF84000): YES (with 16-byte PhysX alignment fix from dev-0.1.9)
+          Extra PRs applied: ${APPLIED_PRS:-none}
+          Extra PRs skipped: ${SKIPPED_PRS:-none}
+          Added 0.1.9 game profiles: ${NX_ADDED_019:-none}
+          TouchControls: 8 separated groups (left stick, D-pad, A B X Y, right stick, − L ZL, + R ZR, L3, R3)
+          APK file: $(basename "$FINAL_APK")
+          APK size: $(du -h "$FINAL_APK" | cut -f1)
+          APK SHA-256: $(sha256sum "$FINAL_APK" | cut -d' ' -f1)
+          EOF
+          cat /tmp/peanuts-out/build-manifest.txt
+          cat /tmp/peanuts-out/build-manifest.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peanuts-native-${{ inputs.version_name || '0.1.9-fork' }}-apk
+          path: |
+            /tmp/peanuts-out/*.apk
+            /tmp/peanuts-out/build-manifest.txt
+          retention-days: 30
